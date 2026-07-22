@@ -203,7 +203,8 @@ def _score_spot(viewpoint: dict, viewpoint_forecast: PointForecast,
 
     ride = score_ride(
         max_gust_kmh=max_gust, max_precip_prob=max_precip_prob,
-        apparent_temperature=min_temp if min_temp is not None else 15.0,
+        apparent_temperature=min_temp if min_temp is not None
+        else float(config.rider.fallback_apparent_temp_c),
         precip_preceding_3h=precip_before,
         returns_after_dark_minutes=returns_after_dark_minutes(events, minutes_one_way),
         config=config,

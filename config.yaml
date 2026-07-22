@@ -23,6 +23,10 @@ home:
 # Rider / bike hard constraints (Honda CB125F on a CBT licence)
 # ---------------------------------------------------------------------------
 rider:
+  # Used when the forecast has no apparent-temperature reading for the ride window
+  # (the archive endpoint, for instance). Mild enough not to skew the ride score
+  # either way.
+  fallback_apparent_temp_c: 15.0
   avoid_motorways: true
   motorway_prefixes: ["M4", "M3", "M40", "M25", "M1"]
   # Used to build the maps deep-link and to estimate ride time.
@@ -496,6 +500,17 @@ schedule:
 
 state:
   path: "state/last_sent.json"
+
+message:
+  # plan mode: an evening needs this share of ensemble members above "good" before
+  # it is presented as worth holding. Raise it to be told about fewer evenings.
+  plan_strong_threshold: 0.30
+  plan_max_ranked: 3
+  # An IQR below this is called "tight" — the real signal an evening is worth holding.
+  plan_tight_iqr: 20.0
+  confirm_max_spots: 3
+  go_max_spots: 3
+  max_exclusions_listed: 5
 
 telegram:
   api_base: "https://api.telegram.org"

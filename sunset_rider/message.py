@@ -118,10 +118,12 @@ def render_plan(result: RunResult, config: Config) -> str:
         assert_no_bare_score(text)
         return text
 
-    strong = [o for o in ranked if o.probability_above_good >= 0.30]
-    weak = [o for o in ranked if o.probability_above_good < 0.30]
+    m = config.message
+    threshold = float(m.plan_strong_threshold)
+    strong = [o for o in ranked if o.probability_above_good >= threshold]
+    weak = [o for o in ranked if o.probability_above_good < threshold]
 
-    for index, outlook in enumerate(strong[:3]):
+    for index, outlook in enumerate(strong[:int(m.plan_max_ranked)]):
         medal = _MEDAL[index] if index < len(_MEDAL) else "•"
         day = outlook.events.local(outlook.events.sunset)
         emoji, _ = mode_label(outlook.dominant_mode, config)
@@ -144,7 +146,7 @@ def render_plan(result: RunResult, config: Config) -> str:
         pct = round(outlook.probability_above_good * 100)
         q1 = round(outlook.stats["q1"])
         q3 = round(outlook.stats["q3"])
-        spread = "tight" if outlook.stats["iqr"] < 20 else "wide"
+        spread = "tight" if outlook.stats["iqr"] < float(m.plan_tight_iqr) else "wide"
         days = (outlook.date - result.target_date).days
         lines.append(
             f"   {pct}% of members above \"good\" · "
@@ -160,7 +162,7 @@ def render_plan(result: RunResult, config: Config) -> str:
         )
         prefix = "both" if len(weak) == 2 else ("all" if len(weak) > 2 else "")
         lines.append(f"😐 {names} — {prefix + ' ' if prefix else ''}"
-                     f"below 30% above \"good\"")
+                     f"below {threshold * 100:.0f}% above \"good\"")
         lines.append("")
 
     if uncovered:
@@ -191,7 +193,7 @@ def render_confirm(result: RunResult, config: Config) -> str:
 
     if not rideable:
         lines = [f"🚫 {header_date} — no rideable spot tomorrow.", ""]
-        lines.extend(_render_exclusions(result))
+        lines.extend(_render_exclusions(result, config))
         return "\n".join(lines)
 
     best = rideable[0]
@@ -218,7 +220,7 @@ def render_confirm(result: RunResult, config: Config) -> str:
         lines.append("")
 
     lines.append("Top spots:")
-    for index, spot in enumerate(rideable[:3]):
+    for index, spot in enumerate(rideable[:int(config.message.confirm_max_spots)]):
         medal = _MEDAL[index] if index < len(_MEDAL) else "•"
         lines.append(
             f"{medal} {spot.name} — {spot.worth_it:.0f} · "
@@ -231,7 +233,7 @@ def render_confirm(result: RunResult, config: Config) -> str:
 
     lines.append("")
     lines.append("The plan is on. Final go/no-go about 3 hours before sunset.")
-    lines.extend(_render_exclusions(result))
+    lines.extend(_render_exclusions(result, config))
     return "\n".join(lines)
 
 
@@ -244,7 +246,7 @@ def render_go(result: RunResult, config: Config) -> str:
 
     if not rideable:
         lines = ["🚫 NO-GO tonight.", ""]
-        lines.extend(_render_exclusions(result))
+        lines.extend(_render_exclusions(result, config))
         lines.append("")
         lines.append("Not dressing this up: nowhere is worth the ride tonight.")
         return "\n".join(lines)
@@ -275,7 +277,7 @@ def render_go(result: RunResult, config: Config) -> str:
             )
         lines.append("")
 
-    for index, spot in enumerate(rideable[:3]):
+    for index, spot in enumerate(rideable[:int(config.message.go_max_spots)]):
         medal = _MEDAL[index] if index < len(_MEDAL) else "•"
         if index == 0:
             lines.extend(_render_primary_spot(medal, spot, config))
@@ -296,7 +298,7 @@ def render_go(result: RunResult, config: Config) -> str:
     if best.output.timelapse_flag:
         lines.append("⏱ Timelapse conditions: fast cloud aloft, still air at the tripod.")
 
-    lines.extend(_render_exclusions(result))
+    lines.extend(_render_exclusions(result, config))
     lines.append("")
     lines.append("Rate it later: /rate 1-5")
     return "\n".join(lines)
@@ -356,14 +358,15 @@ def _render_primary_spot(medal: str, spot: SpotForecast, config: Config) -> list
     return lines
 
 
-def _render_exclusions(result: RunResult) -> list[str]:
+def _render_exclusions(result: RunResult, config: Config) -> list[str]:
     if not result.excluded:
         return []
+    limit = int(config.message.max_exclusions_listed)
     lines = ["", "Excluded tonight:"]
-    for name, reason in result.excluded[:5]:
+    for name, reason in result.excluded[:limit]:
         lines.append(f"  · {name} — {reason}")
-    if len(result.excluded) > 5:
-        lines.append(f"  · …and {len(result.excluded) - 5} more")
+    if len(result.excluded) > limit:
+        lines.append(f"  · …and {len(result.excluded) - limit} more")
     return lines
 
 

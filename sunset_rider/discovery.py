@@ -750,7 +750,8 @@ def harvest_water(candidates: Sequence[Candidate], config: Config, *,
 
     http = session or requests.Session()
     response = http.post(d.overpass_url, data={"data": query},
-                         headers={"User-Agent": d.user_agent}, timeout=300)
+                         headers={"User-Agent": d.user_agent},
+                         timeout=int(d.overpass_timeout) + 30)
     if response.status_code != 200:
         raise WeatherUnavailable(
             f"Overpass (water) returned HTTP {response.status_code}", source="overpass"
