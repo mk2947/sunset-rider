@@ -34,14 +34,35 @@ timelapse bonus).
 
 ### 2. Find your chat ID
 
-Open this URL in a browser, substituting your token:
+Easiest route: message [@userinfobot](https://t.me/userinfobot). It replies with your
+numeric user ID, which **is** your chat ID for a one-to-one chat with your own bot.
+
+Otherwise, open this URL in a browser, substituting your token:
 
 ```
 https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates
 ```
 
 Look for `"chat":{"id":123456789,...}`. That number is your **chat ID**.
-If the response is empty, you skipped step 1.3 — message the bot and retry.
+
+**If the response is empty**, it is one of three things, and they look identical from
+the outside:
+
+1. You have not messaged the bot yet (step 1.3) — a bot cannot open a conversation.
+2. **A webhook is set on the bot.** Telegram will not deliver updates by both webhook
+   and `getUpdates`, so the latter returns empty however many messages you send.
+   This is the one people miss.
+3. The update expired. Telegram keeps updates for about 24 hours, and any earlier
+   `getUpdates` call using an `offset` will already have consumed them.
+
+To find out which:
+
+```bash
+python scripts/get_chat_id.py
+```
+
+It reads `TELEGRAM_BOT_TOKEN` from the environment, never prints it, checks all three
+causes in order and tells you which applies.
 
 ### 3. Add the secrets
 
