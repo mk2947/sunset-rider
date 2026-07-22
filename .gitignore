@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local secrets — never commit a token or chat ID
+.env
+*.secret
+
+# The raw Overpass harvest is ~13 MB, almost all of it car-park geometry we discard
+# during selection. It is a cache of one 3-minute Overpass call, so it is cheap to
+# recreate and not worth carrying in every clone. Re-fetch with:
+#   python -m sunset_rider.discovery --stage harvest --force-harvest
+data/raw/osm_candidates.json
+
+# DELIBERATELY NOT IGNORED, do not add these:
+#   state/last_sent.json    -> dedupe + the 60-day Actions keepalive. See README.
+#   data/raw/horizons.json  -> THE expensive artefact. Several days of rate-limited
+#                              elevation calls. Terrain does not change, so this is
+#                              never re-fetched. Losing it costs days to rebuild.
+#   data/raw/water.json     -> cached water proximity, one Overpass call.
+#   data/viewpoints.yaml    -> the discovered spot list.
+#   data/calibration.csv    -> feedback loop history.

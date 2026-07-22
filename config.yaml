@@ -1,0 +1,512 @@
+# sunset_rider configuration.
+#
+# EVERY tunable number in this project lives here. There are no magic numbers in
+# the code. If you find one, that is a bug.
+#
+# Weights marked "SPEC-FROZEN" are taken verbatim from the design spec and must
+# not be "improved". Some of them deliberately do not sum to 1.0 (see ride.*);
+# that is intentional and preserved as specified.
+
+# ---------------------------------------------------------------------------
+# Location
+# ---------------------------------------------------------------------------
+home:
+  # VERIFIED against api.postcodes.io for RG2 7BD on 2026-07-21.
+  # The design document quoted 51.4180 / -0.9600, which is ~2.9 km south of the
+  # true postcode centroid. The verified value is used instead.
+  postcode: "RG2 7BD"
+  latitude: 51.443326
+  longitude: -0.956334
+  timezone: "Europe/London"
+
+# ---------------------------------------------------------------------------
+# Rider / bike hard constraints (Honda CB125F on a CBT licence)
+# ---------------------------------------------------------------------------
+rider:
+  avoid_motorways: true
+  motorway_prefixes: ["M4", "M3", "M40", "M25", "M1"]
+  # Used to build the maps deep-link and to estimate ride time.
+  average_speed_kmh: 48.0
+  # Great-circle distance underestimates road distance. No routing API is used
+  # (they all need keys), so road_km = straight_line_km * this factor. Documented
+  # as an approximation in the README rather than presented as a routed time.
+  road_distance_factor: 1.30
+  # Time to park, walk to the spot and set up before the light goes.
+  setup_minutes: 45
+  # A penalty, never a blocker: the best light is often after the sun is down.
+  night_penalty: 0.85
+  night_tolerance_min: 45
+
+# ---------------------------------------------------------------------------
+# Solar
+# ---------------------------------------------------------------------------
+solar:
+  # Sun elevation thresholds, degrees above the horizon (negative = below).
+  # Sunset itself uses astral's standard -0.833 (refraction + solar semidiameter).
+  # VERIFIED 2026-07-21: astral gives Reading sunset 21 Jun 2025 = 21:24:12 BST
+  # (az 310.95) and 21 Dec 2025 = 15:56:49 GMT (az 231.61). Open-Meteo's own
+  # solar calculation agrees to the minute on both once its DST bug is bypassed.
+  golden_hour_elevation_deg: 6.0
+  blue_hour_start_elevation_deg: -4.0
+  blue_hour_end_elevation_deg: -6.0
+  civil_dusk_elevation_deg: -6.0
+
+# ---------------------------------------------------------------------------
+# Weather API
+# ---------------------------------------------------------------------------
+weather:
+  forecast_url: "https://api.open-meteo.com/v1/forecast"
+  # VERIFIED: the ensemble API lives on its own subdomain. api.open-meteo.com/v1/ensemble
+  # returns 404. Do not "fix" this back to the main host.
+  ensemble_url: "https://ensemble-api.open-meteo.com/v1/ensemble"
+  elevation_url: "https://api.open-meteo.com/v1/elevation"
+  archive_url: "https://archive-api.open-meteo.com/v1/archive"
+
+  # VERIFIED: Open-Meteo returns utc_offset_seconds=3600 for Europe/London even for
+  # December dates, i.e. it applies a single fixed offset per request and gets GMT
+  # wrong. We therefore ALWAYS request UTC and localise in Python with zoneinfo.
+  # Never set this to a named timezone.
+  request_timezone: "UTC"
+
+  # VERIFIED across all 10 ensemble models on 2026-07-21: only the ECMWF ensembles
+  # expose cloud_cover_low/mid/high. ICON-EU and GFS return total cloud only, which
+  # cannot support the corridor or the mode split. 51 members > the 30 the spec asks for.
+  ensemble_model: "ecmwf_ifs025"
+  ensemble_members_expected: 51
+
+  # VERIFIED: visibility and precipitation_probability are silently null on every
+  # ensemble model. PoP is derived from member agreement instead (which is what an
+  # ensemble PoP actually means), and the visibility-dependent terms are held at a
+  # neutral constant in plan mode only.
+  ensemble_precip_wet_threshold_mm: 0.1
+  ensemble_neutral_visibility_term: 0.5
+
+  # The forecast endpoint only reaches ~92 days into the past. Older dates are
+  # served from the archive endpoint instead, which makes --date work for any
+  # historical evening (useful for calibration backfill and for testing a December
+  # date in July).
+  #
+  # VERIFIED: the archive carries cloud_cover/low/mid/high, relative_humidity_2m,
+  # precipitation, apparent_temperature and wind, but NOT visibility,
+  # precipitation_probability, cape or pressure-level wind. Those degrade to the
+  # neutral fallbacks rather than failing the run.
+  archive_cutoff_days: 60
+
+  retries: 3
+  backoff_base_seconds: 1.0
+  backoff_factor: 2.0
+  timeout_seconds: 30
+  # api.open-meteo.com/v1/elevation rejects >100 coordinate pairs per request.
+  elevation_max_coords_per_request: 100
+  # MEASURED 2026-07-21: the rate limit is counted in LOCATIONS, not requests.
+  # A 429 arrived at exactly the 600th location within a minute. Documented limits
+  # are 600/min, 5000/hour, <10000/day. We self-throttle just under the minute cap.
+  locations_per_minute: 550
+  # A 429 is retried after waiting, unlike other 4xx responses which are our bug.
+  rate_limit_wait_seconds: 62
+  rate_limit_max_waits: 20
+  # Open-Meteo multi-coordinate forecast batching.
+  forecast_max_coords_per_request: 100
+
+  forecast_hourly_variables:
+    - cloud_cover
+    - cloud_cover_low
+    - cloud_cover_mid
+    - cloud_cover_high
+    - visibility
+    - relative_humidity_2m
+    - precipitation_probability
+    - precipitation
+    - apparent_temperature
+    - wind_speed_10m
+    - wind_gusts_10m
+    - cape
+    - wind_speed_500hPa
+    - wind_speed_700hPa
+
+  ensemble_hourly_variables:
+    - cloud_cover
+    - cloud_cover_low
+    - cloud_cover_mid
+    - cloud_cover_high
+    - relative_humidity_2m
+    - precipitation
+    - wind_gusts_10m
+    - cape
+    - wind_speed_500hPa
+
+# ---------------------------------------------------------------------------
+# Discovery pipeline
+# ---------------------------------------------------------------------------
+discovery:
+  overpass_url: "https://overpass-api.de/api/interpreter"
+  # Tried in order if the primary endpoint times out. Both are free public
+  # instances; the harvest is cached permanently so these are hit once, not per run.
+  overpass_fallback_urls:
+    - "https://overpass.kumi.systems/api/interpreter"
+    - "https://overpass.osm.jp/api/interpreter"
+  # 90 s was not enough: way["amenity"="parking"] over a 70 km radius is a heavy
+  # query and Overpass timed out at 107 s, returning HTTP 200 with an empty body
+  # and a "remark". The client now rejects such responses rather than caching them.
+  overpass_timeout: 300
+  # VERIFIED: overpass-api.de returns HTTP 406 for the default python-requests
+  # User-Agent. A descriptive one is both required and good manners on a free
+  # shared server.
+  user_agent: "sunset_rider/2.0 (personal sunset-forecast bot; contact via repo issues)"
+  search_radius_m: 70000
+  raw_osm_cache: "data/raw/osm_candidates.json"
+  raw_horizon_cache: "data/raw/horizons.json"
+  output_viewpoints: "data/viewpoints.yaml"
+  min_raw_candidates: 40
+
+  # Horizon profiling: 36 bearings x 7 distances per candidate.
+  bearing_step_degrees: 10
+  # The design document specified [0.25, 0.5, 1, 2, 4, 8, 15]. The 15 km ring is
+  # omitted because it is provably incapable of affecting any result in this region:
+  # to subtend the 1.5 deg openness threshold at 15 km, terrain must rise 393 m
+  # ABOVE the viewpoint, and the highest point in South East England is Walbury Hill
+  # at 297 m. The 8 km ring (209 m) can genuinely bind — a Thames-valley spot at 40 m
+  # with the Chilterns at 250 m nearby — so it is kept.
+  #
+  # This matters because Open-Meteo's elevation API is capped at 600 locations per
+  # minute and under 10,000 per day (both measured, not assumed), so every sample
+  # has a real cost. See docs/TUNING.md.
+  sample_distances_km: [0.25, 0.5, 1.0, 2.0, 4.0, 8.0]
+  # A bearing counts as "open" if nothing along it rises above this angle.
+  open_horizon_max_angle_deg: 1.5
+  # The sector that matters for sunset from Reading: ~235 deg midwinter to ~311 deg midsummer.
+  sunset_sector_start_deg: 200
+  sunset_sector_end_deg: 330
+  # Candidates below this openness are dropped before enrichment.
+  min_horizon_openness: 0.4
+
+  # Openness alone is not enough. It measures TERRAIN obstruction, and flat ground
+  # has none — a municipal park in central Reading scored horizon_openness 1.00
+  # because nothing rises above it, not because it has a view. The 90 m DEM also
+  # cannot see buildings or trees. Prominence is what separates "nothing blocks the
+  # view" from "there is a view". 0.12 x 120 m normaliser = about 14 m above the
+  # local 5 km mean, which excludes flat ground without excluding gentle rises.
+  min_elevation_prominence: 0.12
+  # Exception: the deliberate close-fallback river and lake spots are low-lying by
+  # nature, and earn their place through reflections rather than elevation.
+  #
+  # This has to be strict. At 0.4 km with no other condition, "Cintra Park" — a
+  # municipal park 300 m from the house with prominence 0.10 — qualified purely
+  # because the Thames runs nearby, and the distance discount then ranked it ABOVE
+  # Walbury Hill (84 vs 63) on a clear evening. A real reflection spot is right at
+  # the water AND has a wide open western horizon; a town park has neither.
+  fallback_water_max_km: 0.2
+  fallback_min_openness: 0.85
+  prominence_radius_km: 5.0
+  # Divisor that normalises (elevation - mean_elevation_within_5km) to roughly 0..1.
+  prominence_normaliser_m: 120.0
+  # Earth radius used for the great-circle offset maths.
+  earth_radius_km: 6371.0
+  # Candidates closer together than this are treated as duplicates.
+  dedupe_min_separation_km: 0.6
+  target_viewpoint_count: 25
+  # "Close fallback" spots: a mediocre evening should mean a 15-minute hop, not staying home.
+  close_fallback_max_km: 12.9   # 8 miles
+  # ...but a hop still means getting the bike out. Anything closer than this is a
+  # walk, not a ride, and it is invariably municipal parkland rather than a
+  # viewpoint: "Cintra Park", 300 m away with prominence 0.10, ranked ABOVE Walbury
+  # Hill on a clear evening purely because the distance discount was 1.0.
+  min_distance_km: 2.0
+
+  # Horizon profiling is the expensive stage: each candidate costs 36 x 7 + 1 = 253
+  # elevation samples, and the endpoint caps at 100 per request. Profiling is
+  # therefore limited to the highest-prior candidates, and paced politely.
+  # 6 bands x 32 high-value + 8 fallbacks = 200 candidates x 217 locations = 43,400,
+  # roughly 4-5 days of elevation budget. That is deliberate and it completes itself:
+  # the run is resumable, the horizon cache is permanent, and viewpoints.yaml is
+  # rebuilt from whatever is cached on every run, so the list is usable throughout.
+  #
+  # Why this deep: there are 118 peaks in the 20-30 km band alone. At 7 per band the
+  # round-robin selected THREE of them, and notable downland — Wittenham Clumps,
+  # Bury Down, Coombe Hill, Uffington — sat in the harvest and was never queued.
+  # Wittenham's Round Hill ranks 10th in its band, so reaching it means going about
+  # that deep in every band.
+  max_profiled_candidates: 200
+  elevation_request_delay_seconds: 0.2
+  overpass_request_delay_seconds: 2.0
+
+  # Cheap prior used to choose which candidates are worth profiling, before any
+  # terrain is known. Higher wins.
+  candidate_type_prior:
+    viewpoint: 100
+    hillfort: 85
+    peak: 80
+    downland: 78      # named natural=grassland — open chalk downland, e.g. Lardon Chase
+    ridge: 75
+    windmill: 70
+    reserve: 60
+    survey_point: 45
+    park: 38          # named country parks, e.g. Dinton Pastures
+    parking: 30
+  # Parking nodes are only kept if they are named or sit within this distance of a
+  # primary candidate — otherwise a 70 km radius returns thousands of car parks.
+  parking_max_distance_to_primary_km: 1.5
+
+  # The elevation budget is the scarce resource (~45 candidates/day), so it goes to
+  # the kinds that actually yield viewpoints. MEASURED on the first full run: every
+  # one of the 11 rejected candidates was a park, car park or nature reserve, and
+  # every accepted spot with prominence > 0.2 was a peak, viewpoint, windmill or
+  # survey point. Flat municipal land has perfect "openness" and no view.
+  high_value_kinds: [viewpoint, peak, hillfort, downland, ridge, windmill, survey_point]
+  # These are only worth profiling as close fallbacks — a 15-minute hop to water on a
+  # mediocre evening — so they are capped and must be within close_fallback_max_km.
+  fallback_kinds: [park, parking, reserve]
+  max_fallback_candidates: 8
+
+  # Selection is stratified by distance band so the 110-candidate elevation budget
+  # is not consumed entirely by spots within 20 km. Without this, far downland
+  # (Walbury Hill, Uffington) never gets profiled.
+  distance_bands_km: [[0, 10], [10, 20], [20, 30], [30, 40], [40, 50], [50, 70]]
+  max_per_distance_band: 32
+
+  # Water proximity drives foreground_motion (moving water = life in frame).
+  raw_water_cache: "data/raw/water.json"
+  water_search_radius_m: 1500
+  # Distance at which water stops contributing to foreground motion.
+  water_full_credit_km: 0.35
+  water_zero_credit_km: 1.5
+
+# ---------------------------------------------------------------------------
+# Per-spot quality (the "spot" term in worth_it, 0-100)
+# ---------------------------------------------------------------------------
+spot:
+  weight_openness: 0.45
+  weight_prominence: 0.30
+  weight_type: 0.25
+  # foreground_interest = layered relief you can compose against.
+  foreground_interest_openness_weight: 0.4
+  foreground_interest_prominence_weight: 0.6
+  # Spots with no known gate are preferred over spots with an unknown one.
+  unknown_gate_penalty: 0.95
+
+# ---------------------------------------------------------------------------
+# Corridor: the sun-to-sky path. SPEC-FROZEN.
+# ---------------------------------------------------------------------------
+corridor:
+  distances_km: [30, 80, 150, 250]
+  weights: [0.40, 0.30, 0.20, 0.10]
+  # Which corridor points count as "far" for the moody slot detector.
+  far_indices: [2, 3]
+  near_index: 0
+
+# ---------------------------------------------------------------------------
+# Scoring: three aesthetic modes. SPEC-FROZEN.
+# ---------------------------------------------------------------------------
+scoring:
+  # Interpolate weather between the two hours bracketing sunset rather than rounding.
+  interpolate_sunset_hour: true
+  cloud_cover_max: 100
+
+  vivid:
+    canvas_peak_mhc: 45.0
+    canvas_sigma: 22.0
+    clarity_visibility_weight: 0.6
+    clarity_visibility_full_m: 25000.0
+    clarity_humidity_weight: 0.4
+    clarity_rh_peak: 55.0
+    clarity_rh_sigma: 20.0
+    weight_canvas: 0.45
+    weight_corridor: 0.35
+    weight_clarity: 0.20
+    cap_low_overhead_above: 85.0
+    cap_low_overhead_value: 25.0
+    cap_precip_prob_above: 60.0
+    cap_precip_prob_value: 30.0
+    cap_total_cc_above: 95.0
+    cap_total_cc_value: 15.0
+
+  moody:
+    deck_floor: 55.0
+    deck_span: 35.0
+    texture_peak_mid: 55.0
+    texture_span: 55.0
+    drama_cape_full: 400.0
+    drama_cape_weight: 0.5
+    drama_base: 0.5
+    rain_ok_threshold: 45.0
+    rain_ok_penalty: 0.4
+    weight_deck: 0.30
+    weight_slot: 0.35
+    weight_texture: 0.20
+    weight_drama: 0.15
+    # Clearing front: total cloud falling by more than this many percentage points
+    # over the two hours after sunset, while the corridor is already clear.
+    clearing_front_drop_pp: 25.0
+    clearing_front_hours_after_sunset: 2
+    clearing_front_corridor_clear_min: 0.6
+    clearing_front_bonus: 12.0
+    score_cap: 100.0
+    # Guard, not a weight change. All four moody weights above are exactly as
+    # specified. Without this, a comprehensively overcast evening (90% overhead AND
+    # 95% low cloud from 30-250 km toward the sun) still scored 63 = GOOD, because
+    # deck + texture + drama pay out 65% of the weight regardless of the slot, and
+    # drama has a hard floor of 0.5. There is no sunset to photograph on such an
+    # evening. Section 5c's stated intent is that moody detects a CONTRAST between
+    # overhead and corridor, so a vanished slot must collapse the score.
+    # A real godray evening (slot ~0.85) is unaffected.
+    cap_no_slot_below: 0.15
+    cap_no_slot_value: 30.0
+
+  minimal:
+    cleanliness_cc_full: 20.0
+    air_visibility_full_m: 30000.0
+    weight_cleanliness: 0.45
+    weight_air: 0.35
+    weight_corridor: 0.20
+
+  # Turn these to weight your own taste. First dial to reach for. See docs/TUNING.md.
+  mode_bias:
+    vivid: 1.0
+    moody: 1.0
+    minimal: 1.0
+
+  # Report the runner-up mode if it is within this many points of the winner.
+  runner_up_within: 10.0
+
+# ---------------------------------------------------------------------------
+# Photo vs video. SPEC-FROZEN.
+# ---------------------------------------------------------------------------
+output:
+  # "either" -> max(photo, video). Otherwise a weighted blend.
+  optimise: "either"
+  blend_photo_weight: 0.5
+  blend_video_weight: 0.5
+
+  photo:
+    weight_sky: 0.55
+    weight_foreground_interest: 0.20
+    weight_dynamic_range: 0.15
+    weight_wind: 0.10
+    gust_divisor: 70.0
+
+  video:
+    weight_sky: 0.40
+    weight_wind: 0.25
+    weight_blue_hour: 0.20
+    weight_foreground_motion: 0.15
+    gust_divisor: 45.0
+    # Blue-hour minutes that count as a full-marks shot budget.
+    blue_hour_full_minutes: 40.0
+
+  timelapse:
+    min_wind_500hpa: 40.0
+    max_gusts_10m: 25.0
+    min_total_cc: 20.0
+    max_total_cc: 80.0
+
+  # Verdict thresholds: how far apart photo and video must be to call it either way.
+  verdict_margin: 8.0
+
+# ---------------------------------------------------------------------------
+# Ride score and hard blockers. SPEC-FROZEN.
+# ---------------------------------------------------------------------------
+ride:
+  gust_floor_kmh: 25.0
+  gust_span_kmh: 40.0
+  rain_span_pct: 60.0
+  temp_mu_c: 18.0
+  temp_sigma_c: 10.0
+  dry_road_wet_multiplier: 0.6
+  # NOTE: these three deliberately sum to 0.90, exactly as specified. Not a typo,
+  # and not to be "corrected" -- it scales the whole ride term down slightly.
+  weight_gust: 0.35
+  weight_rain: 0.35
+  weight_temp: 0.20
+
+blockers:
+  max_gust_kmh: 60.0
+  min_apparent_temp_c: 2.0
+  max_precip_probability: 70.0
+  min_visibility_m: 2000.0
+  # A spot is dropped if its gate shuts before sunset + this many minutes.
+  gate_buffer_minutes: 45
+  gate_closes_always_blocking: ["sunset", "dusk"]
+
+# ---------------------------------------------------------------------------
+# worth_it and dynamic radius. SPEC-FROZEN.
+# ---------------------------------------------------------------------------
+worth_it:
+  weight_sky: 0.50
+  weight_output: 0.20
+  weight_ride: 0.15
+  weight_spot: 0.15
+
+  distance_discount_rate: 0.20
+  distance_discount_reference_minutes: 45.0
+  distance_discount_floor: 0.55
+  distance_discount_ceiling: 1.0
+
+  azimuth_in_arc: 1.0
+  azimuth_near_arc: 0.7
+  azimuth_near_tolerance_deg: 15.0
+  azimuth_outside: 0.35
+
+  radius_base_km: 20.0
+  radius_span_km: 45.0
+  radius_exponent: 1.5
+
+bands:
+  # Upper bounds are inclusive; evaluated top-down.
+  - {min: 90, label: "DROP EVERYTHING", emoji: "🔥"}
+  - {min: 75, label: "EXCELLENT", emoji: "⭐"}
+  - {min: 60, label: "GOOD", emoji: "✅"}
+  - {min: 45, label: "DECENT — stay local", emoji: "🙂"}
+  - {min: 0,  label: "POOR", emoji: "😐"}
+
+mode_display:
+  vivid:   {emoji: "🔥", description: "classic fire sky — saturated colour, shoot wide and bracket"}
+  moody:   {emoji: "🌧️", description: "heavy deck with a horizon slot — godrays and spotlit ground"}
+  minimal: {emoji: "🌌", description: "clean gradient — silhouettes, smooth ramp, long usable window"}
+
+# ---------------------------------------------------------------------------
+# Scheduling. All windows evaluated in local (Europe/London) time.
+# Cron decides whether to wake; Python decides whether to act.
+# Windows are >=30 min wide because scheduled Actions runs are routinely
+# delayed 5-30 minutes under load.
+# ---------------------------------------------------------------------------
+schedule:
+  plan:
+    weekdays: [6, 2]        # Monday=0 ... Sunday=6. So Sunday and Wednesday.
+    start: "19:00"
+    end: "20:00"
+    horizon_days: 5
+  confirm:
+    start: "19:30"
+    end: "20:30"
+    target_offset_days: 1
+  go:
+    # Fires when "now" is between these many minutes before today's sunset.
+    #
+    # The design document specified 165-195 min (2h45m-3h15m), a 30-minute window.
+    # That cannot work: cron fires once an hour, so a 30-minute window only contains
+    # an hourly tick about half the time. Simulating every day of 2025 with the
+    # :17 schedule, a 30-minute window produced ZERO `go` messages on 165 days.
+    #
+    # Any window narrower than 60 minutes has gaps under hourly sampling; any window
+    # 120 minutes or wider can fire twice. Exactly 60 minutes, half-open, guarantees
+    # precisely one tick per day — which is what section 12 requires. The window is
+    # anchored to sunset, so it stays correct across both DST boundaries.
+    min_minutes_before_sunset: 165   # 2h45m
+    max_minutes_before_sunset: 225   # 3h45m
+
+state:
+  path: "state/last_sent.json"
+
+telegram:
+  api_base: "https://api.telegram.org"
+  parse_mode: "HTML"
+  # Rendered message hard limit; Telegram rejects above 4096.
+  max_message_chars: 4000
+
+calibration:
+  csv_path: "data/calibration.csv"
+  min_entries_before_tuning: 20
+
+logging:
+  level: "INFO"
+  debug_score_breakdown: true

@@ -1,0 +1,92 @@
+name: sunset forecast
+
+# Cron decides whether to WAKE. Python decides whether to ACT.
+#
+# GitHub Actions cron is UTC-only, so any fixed UTC schedule drifts by an hour
+# across the GMT/BST boundary — fatal for a sunset-timed job. This runs hourly and
+# sunset_rider.gating self-gates against Europe/London using zoneinfo. Do not
+# replace the Python gate with a cleverer cron expression; it cannot be done.
+#
+# 08-21 UTC covers every send window in both BST and GMT:
+#   plan    19:00-20:00 local -> 18:00-19:00 UTC (BST) / 19:00-20:00 UTC (GMT)
+#   confirm 19:30-20:30 local -> 18:30-19:30 UTC (BST) / 19:30-20:30 UTC (GMT)
+#   go      ~3h before sunset -> 17:00 UTC midsummer / 12:45 UTC midwinter
+#
+# :17 dodges the top-of-hour queue congestion that delays scheduled runs.
+
+on:
+  schedule:
+    - cron: '17 8-21 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Force a mode (leave blank to self-gate on the schedule)'
+        required: false
+        type: choice
+        options: ['', 'plan', 'confirm', 'go']
+        default: ''
+      date:
+        description: 'Target date YYYY-MM-DD (blank = today)'
+        required: false
+        type: string
+      dry_run:
+        description: 'Print to the log instead of sending to Telegram'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: sunset-forecast
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # required to commit state/last_sent.json (dedupe + keepalive)
+
+jobs:
+  forecast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run forecast
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.mode }}" ]; then ARGS="$ARGS --mode ${{ inputs.mode }}"; fi
+          if [ -n "${{ inputs.date }}" ]; then ARGS="$ARGS --date ${{ inputs.date }}"; fi
+          if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          echo "running: python -m sunset_rider.main $ARGS"
+          python -m sunset_rider.main $ARGS
+
+      # This commit is doing DOUBLE DUTY. It persists the send-dedupe state, and it
+      # is also the keepalive: GitHub silently disables scheduled workflows after 60
+      # days with no commit to the default branch. Removing this step would stop the
+      # whole service dead, with no error and no notification. See the README.
+      - name: Commit state (dedupe + 60-day keepalive)
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state/ data/predictions.csv 2>/dev/null || true
+          if git diff --staged --quiet; then
+            # Nothing sent this run. Touch the heartbeat so the 60-day timer resets
+            # even during a quiet spell.
+            date -u +"%Y-%m-%dT%H:%M:%SZ" > state/heartbeat.txt
+            git add state/heartbeat.txt
+          fi
+          if ! git diff --staged --quiet; then
+            git commit -m "state: forecast run [skip ci]"
+            git push
+          fi
